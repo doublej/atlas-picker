@@ -1,0 +1,1 @@
+/Users/jurrejan/Documents/development/_management/project-picker/target/release/project-picker: /Users/jurrejan/Documents/development/_management/project-picker/src/main.rs /Users/jurrejan/Documents/development/_management/project-picker/src/project.rs /Users/jurrejan/Documents/development/_management/project-picker/src/ui.rs
