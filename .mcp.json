@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "consult-user-sketch": {
+      "command": "node",
+      "args": [
+        "/Users/jurrejan/Documents/development/swift/ConsultUserSketch/mcp-server/dist/index.js"
+      ]
+    }
+  }
+}

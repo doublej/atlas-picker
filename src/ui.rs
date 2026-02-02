@@ -1,172 +1,453 @@
 use crate::project::Project;
+use crate::splash::Splash;
+use crate::theme::Theme;
 use anyhow::Result;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+use iocraft::prelude::*;
+use nucleo::{
+    pattern::{CaseMatching, Normalization, Pattern},
+    Config, Matcher, Utf32Str,
 };
-use nucleo::{Config, Matcher, Utf32Str};
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Terminal,
-};
-use std::io;
+use std::os::unix::io::AsRawFd;
+use std::time::Duration;
 
-struct App<'a> {
-    projects: &'a [Project],
-    filtered: Vec<(usize, u32)>, // (index, score)
-    query: String,
-    list_state: ListState,
-    matcher: Matcher,
+fn filter_projects(projects: &[Project], query: &str) -> Vec<(usize, u32)> {
+    if query.is_empty() {
+        return projects.iter().enumerate().map(|(i, _)| (i, 0)).collect();
+    }
+    let mut buf = Vec::new();
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut results: Vec<_> = projects
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| {
+            let haystack = format!(
+                "{} {} {}",
+                p.name,
+                p.relative_path,
+                p.description.as_deref().unwrap_or("")
+            );
+            pattern
+                .score(Utf32Str::new(&haystack, &mut buf), &mut matcher)
+                .map(|score| (i, score))
+        })
+        .collect();
+    results.sort_by(|a, b| b.1.cmp(&a.1));
+    results
 }
 
-impl<'a> App<'a> {
-    fn new(projects: &'a [Project]) -> Self {
-        let filtered: Vec<_> = projects.iter().enumerate().map(|(i, _)| (i, 0u32)).collect();
-        let mut list_state = ListState::default();
-        if !filtered.is_empty() {
-            list_state.select(Some(0));
-        }
-        Self {
-            projects,
-            filtered,
-            query: String::new(),
-            list_state,
-            matcher: Matcher::new(Config::DEFAULT),
-        }
+fn scroll_offset(selected: usize, visible: usize, total: usize) -> usize {
+    if total <= visible || selected < visible / 2 {
+        return 0;
     }
-
-    fn update_filter(&mut self) {
-        self.filtered = if self.query.is_empty() {
-            self.projects.iter().enumerate().map(|(i, _)| (i, 0)).collect()
-        } else {
-            let mut buf = Vec::new();
-            let pattern = nucleo::pattern::Pattern::parse(&self.query, nucleo::pattern::CaseMatching::Smart, nucleo::pattern::Normalization::Smart);
-            let mut results: Vec<_> = self.projects.iter().enumerate().filter_map(|(i, p)| {
-                let haystack = format!("{} {} {}", p.name, p.relative_path, p.description.as_deref().unwrap_or(""));
-                pattern.score(Utf32Str::new(&haystack, &mut buf), &mut self.matcher).map(|score| (i, score))
-            }).collect();
-            results.sort_by(|a, b| b.1.cmp(&a.1));
-            results
-        };
-        self.list_state.select((!self.filtered.is_empty()).then_some(0));
-    }
-
-    fn selected_project(&self) -> Option<&Project> {
-        self.list_state
-            .selected()
-            .and_then(|i| self.filtered.get(i))
-            .map(|(idx, _)| &self.projects[*idx])
-    }
-
-    fn move_selection(&mut self, delta: i32) {
-        if self.filtered.is_empty() {
-            return;
-        }
-        let len = self.filtered.len();
-        let current = self.list_state.selected().unwrap_or(0) as i32;
-        let new = (current + delta).rem_euclid(len as i32) as usize;
-        self.list_state.select(Some(new));
+    if selected + visible / 2 >= total {
+        total - visible
+    } else {
+        selected - visible / 2
     }
 }
 
-pub fn run_picker(projects: &[Project]) -> Result<Option<Project>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let mut app = App::new(projects);
-    let result = run_loop(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-
-    result
+struct ListRow {
+    is_selected: bool,
+    name: String,
+    framework: Option<String>,
+    project_type: Option<String>,
 }
 
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<Option<Project>> {
-    loop {
-        terminal.draw(|f| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(6)])
-                .split(f.area());
+struct PreviewLine {
+    text: String,
+    color: Color,
+}
 
-            // Search input
-            let input = Paragraph::new(app.query.as_str())
-                .style(Style::default().fg(Color::Yellow))
-                .block(Block::default().borders(Borders::ALL).title(format!(" Search ({} projects) ", app.filtered.len())));
-            f.render_widget(input, chunks[0]);
+#[derive(Default, Props)]
+struct PickerProps<'a> {
+    projects: Vec<Project>,
+    theme: Option<Theme>,
+    cache_age: Option<String>,
+    result_out: Option<&'a mut Option<Project>>,
+}
 
-            // Project list
-            let items: Vec<ListItem> = app.filtered.iter().map(|(idx, _)| {
-                let p = &app.projects[*idx];
-                let mut spans = vec![Span::styled(&p.name, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))];
-                if let Some(fw) = &p.framework {
-                    spans.extend([Span::raw(" "), Span::styled(format!("[{}]", fw), Style::default().fg(Color::Magenta))]);
-                }
-                if let Some(t) = &p.project_type {
-                    spans.extend([Span::raw(" "), Span::styled(t, Style::default().fg(Color::DarkGray))]);
-                }
-                ListItem::new(Line::from(spans))
-            }).collect();
+#[component]
+fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let mut system = hooks.use_context_mut::<SystemContext>();
+    let (term_w, term_h) = hooks.use_terminal_size();
+    let mut query = hooks.use_state(String::new);
+    let mut selected = hooks.use_state(|| 0usize);
+    let mut exit_action = hooks.use_state(|| 0u8); // 0=none, 1=quit, 2=select
 
-            let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(" Projects "))
-                .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
-                .highlight_symbol("▶ ");
-            f.render_stateful_widget(list, chunks[1], &mut app.list_state);
+    // Theme state for live cycling
+    let mut current_theme = hooks.use_state({
+        let initial = props.theme.unwrap_or_else(Theme::dark);
+        move || initial
+    });
+    let t = current_theme.get();
 
-            // Preview pane
-            let dim = Style::default().fg(Color::DarkGray);
-            let preview = if let Some(p) = app.selected_project() {
-                let mut lines = vec![Line::from(vec![Span::styled("Path: ", dim), Span::raw(&p.path)])];
-                if let Some(desc) = &p.description {
-                    lines.push(Line::from(vec![Span::styled("Desc: ", dim), Span::raw(desc)]));
-                }
-                if let Some(branch) = &p.git_branch {
-                    let color = match p.git.as_deref() {
-                        Some("clean") => Color::Green, Some("dirty") => Color::Yellow, _ => Color::DarkGray,
-                    };
-                    lines.push(Line::from(vec![Span::styled("Git:  ", dim), Span::styled(branch, Style::default().fg(color))]));
-                }
-                if let Some(cmd) = &p.dev_command {
-                    lines.push(Line::from(vec![Span::styled("Dev:  ", dim), Span::raw(format!("{} run {}", p.runner.as_deref().unwrap_or("npm"), cmd))]));
-                }
-                Paragraph::new(lines)
-            } else {
-                Paragraph::new("No project selected")
-            };
-            f.render_widget(preview.block(Block::default().borders(Borders::ALL).title(" Preview ")), chunks[2]);
-        })?;
+    // Theme toast state
+    let mut show_theme_toast = hooks.use_state(|| false);
+    let mut theme_toast_name = hooks.use_state(String::new);
+    let dismiss_toast = hooks.use_async_handler(move |()| async move {
+        smol::Timer::after(Duration::from_millis(1500)).await;
+        show_theme_toast.set(false);
+    });
 
-        if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+    // Splash state — visible for 2s then gone
+    let mut show_splash = hooks.use_state(|| true);
+    hooks.use_future(async move {
+        smol::Timer::after(Duration::from_secs(2)).await;
+        show_splash.set(false);
+    });
+
+    // Cache age string (computed once from props)
+    let cache_age = hooks.use_state({
+        let age = props.cache_age.take().unwrap_or_default();
+        move || age
+    });
+
+    // Projects state: owned by component, refreshable via Ctrl+R
+    let mut projects_state =
+        hooks.use_state::<Vec<Project>, _>(|| std::mem::take(&mut props.projects));
+    let mut refresh_status = hooks.use_state(|| 0u8); // 0=idle, 1=loading, 2=success, 3=error
+    let mut refresh_msg = hooks.use_state(String::new);
+
+    let refresh = hooks.use_async_handler(move |()| async move {
+        refresh_status.set(1);
+        match smol::unblock(crate::project::refresh_projects).await {
+            Ok(new_projects) => {
+                let count = new_projects.len();
+                projects_state.set(new_projects);
+                selected.set(0);
+                refresh_msg.set(format!("Refreshed: {count} projects"));
+                refresh_status.set(2);
+                smol::Timer::after(Duration::from_secs(2)).await;
+                if refresh_status.get() == 2 {
+                    refresh_status.set(0);
                 }
-                match key.code {
-                    KeyCode::Esc => return Ok(None),
-                    KeyCode::Enter => return Ok(app.selected_project().cloned()),
-                    KeyCode::Up => app.move_selection(-1),
-                    KeyCode::Down => app.move_selection(1),
+            }
+            Err(e) => {
+                refresh_msg.set(format!("{e}"));
+                refresh_status.set(3);
+                smol::Timer::after(Duration::from_secs(3)).await;
+                if refresh_status.get() == 3 {
+                    refresh_status.set(0);
+                }
+            }
+        }
+    });
+
+    let all_projects = projects_state.read();
+    let query_str = query.to_string();
+    let query_empty = query_str.is_empty();
+    let filtered = filter_projects(&all_projects, &query_str);
+    let count = filtered.len();
+    let sel = if count > 0 {
+        selected.get().min(count - 1)
+    } else {
+        0
+    };
+
+    hooks.use_terminal_events({
+        let refresh = refresh.clone();
+        let dismiss_toast = dismiss_toast.clone();
+        move |event| {
+            if let TerminalEvent::Key(KeyEvent {
+                code,
+                kind,
+                modifiers,
+                ..
+            }) = event
+            {
+                if kind == KeyEventKind::Release {
+                    return;
+                }
+                match code {
+                    KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        if refresh_status.get() != 1 {
+                            refresh(());
+                        }
+                    }
+                    KeyCode::Char('t') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        let cur = current_theme.get();
+                        let next = crate::theme::next_theme(cur.name);
+                        theme_toast_name.set(next.name.to_string());
+                        current_theme.set(next);
+                        show_theme_toast.set(true);
+                        dismiss_toast(());
+                    }
+                    KeyCode::Esc => exit_action.set(1),
+                    KeyCode::Enter => exit_action.set(2),
+                    KeyCode::Up if count > 0 => {
+                        let cur = selected.get() as i32;
+                        selected.set((cur - 1).rem_euclid(count as i32) as usize);
+                    }
+                    KeyCode::Down if count > 0 => {
+                        selected.set((selected.get() + 1) % count);
+                    }
                     KeyCode::Backspace => {
-                        app.query.pop();
-                        app.update_filter();
+                        let mut q = query.to_string();
+                        q.pop();
+                        query.set(q);
+                        selected.set(0);
                     }
                     KeyCode::Char(c) => {
-                        app.query.push(c);
-                        app.update_filter();
+                        let mut q = query.to_string();
+                        q.push(c);
+                        query.set(q);
+                        selected.set(0);
                     }
                     _ => {}
                 }
             }
         }
+    });
+
+    if exit_action.get() == 1 {
+        system.exit();
+        return element!(View);
     }
+    if exit_action.get() == 2 {
+        if let Some(&(idx, _)) = filtered.get(sel) {
+            if let Some(out) = props.result_out.as_mut() {
+                **out = Some(all_projects[idx].clone());
+            }
+        }
+        system.exit();
+        return element!(View);
+    }
+
+    // Visible list rows
+    let splash_visible = show_splash.get();
+    let splash_reserve = if splash_visible { 8 } else { 0 };
+    let list_h = (term_h as usize)
+        .saturating_sub(11)
+        .saturating_sub(splash_reserve)
+        .max(3);
+    let scroll = scroll_offset(sel, list_h, count);
+    let rows: Vec<ListRow> = filtered[scroll..(scroll + list_h).min(count)]
+        .iter()
+        .enumerate()
+        .map(|(i, &(idx, _))| {
+            let p = &all_projects[idx];
+            ListRow {
+                is_selected: scroll + i == sel,
+                name: p.name.clone(),
+                framework: p.framework.clone(),
+                project_type: p.project_type.clone(),
+            }
+        })
+        .collect();
+
+    // Preview lines
+    let preview_lines: Vec<PreviewLine> = if let Some(&(idx, _)) = filtered.get(sel) {
+        let p = &all_projects[idx];
+        let mut lines = vec![PreviewLine {
+            text: format!("Path: {}", p.path),
+            color: t.text,
+        }];
+        if let Some(d) = &p.description {
+            lines.push(PreviewLine {
+                text: format!("Desc: {d}"),
+                color: t.text,
+            });
+        }
+        if let Some(b) = &p.git_branch {
+            let color = match p.git.as_deref() {
+                Some("clean") => t.success,
+                Some("dirty") => t.warning,
+                _ => t.text_muted,
+            };
+            lines.push(PreviewLine {
+                text: format!("Git:  {b}"),
+                color,
+            });
+        }
+        if let Some(cmd) = &p.dev_command {
+            lines.push(PreviewLine {
+                text: format!("Dev:  {} run {cmd}", p.runner.as_deref().unwrap_or("npm")),
+                color: t.text,
+            });
+        }
+        lines
+    } else {
+        vec![PreviewLine {
+            text: "No project selected".into(),
+            color: t.text_muted,
+        }]
+    };
+
+    // Status text for search bar
+    let rs = refresh_status.get();
+    let toast_active = show_theme_toast.get();
+    let status_text = if toast_active {
+        format!("Theme: {}", *theme_toast_name.read())
+    } else {
+        match rs {
+            1 => "Refreshing...".to_string(),
+            2 => refresh_msg.to_string(),
+            3 => format!("Error: {}", *refresh_msg.read()),
+            _ => {
+                let age_str = cache_age.to_string();
+                if age_str.is_empty() {
+                    format!("{count} projects")
+                } else {
+                    format!("{count} projects \u{b7} {age_str}")
+                }
+            }
+        }
+    };
+    let status_color = if toast_active {
+        t.accent
+    } else {
+        match rs {
+            1 => t.warning,
+            2 => t.success,
+            3 => t.error,
+            _ => t.text_muted,
+        }
+    };
+
+    element! {
+        View(width: term_w, height: term_h, flex_direction: FlexDirection::Column, background_color: t.bg) {
+            // Search
+            View(
+                height: 3u32,
+                border_style: BorderStyle::Round,
+                border_color: t.border,
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::SpaceBetween,
+            ) {
+                Text(
+                    content: if query_empty {
+                        "Type to search...".to_string()
+                    } else {
+                        query_str
+                    },
+                    color: if query_empty { t.text_muted } else { t.accent },
+                )
+                Text(content: status_text, color: status_color)
+            }
+            // Project list
+            View(
+                flex_grow: 1.0,
+                flex_direction: FlexDirection::Column,
+                overflow: Overflow::Hidden,
+            ) {
+                #(rows.iter().map(|row| {
+                    element! {
+                        View(
+                            flex_direction: FlexDirection::Row,
+                            background_color: if row.is_selected { t.selected_bg } else { t.bg },
+                        ) {
+                            Text(
+                                content: " ",
+                                color: t.accent,
+                            )
+                            Text(
+                                content: row.name.clone(),
+                                color: t.project,
+                                weight: Weight::Bold,
+                            )
+                            #(row.framework.as_ref().map(|fw| {
+                                element! {
+                                    Text(content: format!(" [{fw}]"), color: t.framework)
+                                }
+                            }))
+                            #(row.project_type.as_ref().map(|pt| {
+                                element! {
+                                    Text(content: format!(" {pt}"), color: t.text_muted)
+                                }
+                            }))
+                        }
+                    }
+                }))
+                Splash(visible: splash_visible, color: t.text_muted, accent: Some(t.accent))
+            }
+            // Bottom panes
+            View(height: 8u32, flex_direction: FlexDirection::Row) {
+                // Preview
+                View(
+                    width: 50pct,
+                    border_style: BorderStyle::Round,
+                    border_color: t.border,
+                    flex_direction: FlexDirection::Column,
+                ) {
+                    #(preview_lines.iter().map(|line| {
+                        element! {
+                            Text(content: line.text.clone(), color: line.color)
+                        }
+                    }))
+                }
+                // Hotkeys
+                View(
+                    width: 50pct,
+                    border_style: BorderStyle::Round,
+                    border_color: t.border,
+                    flex_direction: FlexDirection::Column,
+                ) {
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: "\u{2191}/\u{2193}  ", color: t.accent)
+                        Text(content: "Navigate", color: t.text)
+                    }
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: "Enter ", color: t.accent)
+                        Text(content: "Select project", color: t.text)
+                    }
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: "Esc   ", color: t.accent)
+                        Text(content: "Quit", color: t.text)
+                    }
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: "^R    ", color: t.accent)
+                        Text(content: "Refresh index", color: t.text)
+                    }
+                    View(flex_direction: FlexDirection::Row) {
+                        Text(content: "^T    ", color: t.accent)
+                        Text(content: "Cycle theme", color: t.text)
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn run_picker(
+    projects: &[Project],
+    theme: Theme,
+    scanned_at: Option<&str>,
+) -> Result<Option<Project>> {
+    let mut result: Option<Project> = None;
+    let cache_age = scanned_at
+        .map(crate::project::format_cache_age)
+        .unwrap_or_default();
+
+    // Redirect stdout to /dev/tty so iocraft renders to terminal,
+    // keeping original stdout free for shell integration output
+    let tty = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")?;
+    let saved_stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    anyhow::ensure!(saved_stdout != -1, "failed to dup stdout");
+    unsafe { libc::dup2(tty.as_raw_fd(), libc::STDOUT_FILENO) };
+    drop(tty);
+
+    let render_result = smol::block_on(
+        element! {
+            Picker(
+                projects: projects.to_vec(),
+                theme: Some(theme),
+                cache_age: Some(cache_age),
+                result_out: &mut result,
+            )
+        }
+        .fullscreen(),
+    );
+
+    // Restore original stdout
+    unsafe {
+        libc::dup2(saved_stdout, libc::STDOUT_FILENO);
+        libc::close(saved_stdout);
+    }
+
+    render_result?;
+    Ok(result)
 }

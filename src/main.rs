@@ -1,4 +1,6 @@
 mod project;
+mod splash;
+mod theme;
 mod ui;
 
 use anyhow::{Context, Result};
@@ -19,6 +21,10 @@ struct Args {
     /// Action to perform: print (default), cd, code, or run
     #[arg(short, long, default_value = "print")]
     action: String,
+
+    /// Color theme: auto (detect from terminal), light, or dark
+    #[arg(short, long, default_value = "auto")]
+    theme: String,
 }
 
 fn main() -> Result<()> {
@@ -32,15 +38,16 @@ fn main() -> Result<()> {
 
     let cache_path = base_dir.join(".project-index-cache.json");
 
-    let projects = project::load_cache(&cache_path)
+    let cache = project::load_cache(&cache_path)
         .with_context(|| format!("Failed to load cache from {}", cache_path.display()))?;
 
-    if projects.is_empty() {
+    if cache.projects.is_empty() {
         eprintln!("No projects found in cache. Run project-index first to scan.");
         std::process::exit(1);
     }
 
-    let selected = ui::run_picker(&projects)?;
+    let theme = theme::resolve(&args.theme);
+    let selected = ui::run_picker(&cache.projects, theme, cache.scanned_at.as_deref())?;
 
     if let Some(project) = selected {
         match args.action.as_str() {
