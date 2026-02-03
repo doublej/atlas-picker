@@ -118,6 +118,7 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
     let mut exit_action = hooks.use_state(|| 0u8); // 0=none, 1=quit, 2=select
     let mut selected_action = hooks.use_state(|| 0usize); // Index into ACTIONS
     let mut in_code_submenu = hooks.use_state(|| false);
+    let mut do_copy = hooks.use_state(|| false); // Flag to trigger copy operation
 
     // Theme state for live cycling
     let mut current_theme = hooks.use_state({
@@ -132,6 +133,14 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
     let dismiss_toast = hooks.use_async_handler(move |()| async move {
         smol::Timer::after(Duration::from_millis(1500)).await;
         show_theme_toast.set(false);
+    });
+
+    // Copy toast state
+    let mut show_copy_toast = hooks.use_state(|| false);
+    let mut copy_toast_msg = hooks.use_state(String::new);
+    let dismiss_copy_toast = hooks.use_async_handler(move |()| async move {
+        smol::Timer::after(Duration::from_millis(1500)).await;
+        show_copy_toast.set(false);
     });
 
     // Splash state — visible for 2s then gone
@@ -224,7 +233,17 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
                             exit_action.set(1);
                         }
                     }
-                    KeyCode::Enter => exit_action.set(2),
+                    KeyCode::Enter => {
+                        // Check if Copy action is selected
+                        if count > 0 && !in_code_submenu.get() {
+                            let action_idx = selected_action.get();
+                            if ACTIONS[action_idx] == Action::Copy {
+                                do_copy.set(true);
+                                return; // Don't set exit_action
+                            }
+                        }
+                        exit_action.set(2)
+                    }
                     KeyCode::Up if count > 0 => {
                         let cur = selected.get() as i32;
                         selected.set((cur - 1).rem_euclid(count as i32) as usize);
@@ -261,6 +280,34 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
             }
         }
     });
+
+    // Handle copy action
+    if do_copy.get() {
+        do_copy.set(false);
+        if let Some(&(idx, _)) = filtered.get(sel) {
+            let project = &all_projects[idx];
+            use arboard::Clipboard;
+            match Clipboard::new() {
+                Ok(mut clipboard) => match clipboard.set_text(&project.path) {
+                    Ok(_) => {
+                        copy_toast_msg.set(format!("Copied: {}", project.name));
+                        show_copy_toast.set(true);
+                        dismiss_copy_toast(());
+                    }
+                    Err(_) => {
+                        copy_toast_msg.set("Failed to copy".to_string());
+                        show_copy_toast.set(true);
+                        dismiss_copy_toast(());
+                    }
+                },
+                Err(_) => {
+                    copy_toast_msg.set("Clipboard unavailable".to_string());
+                    show_copy_toast.set(true);
+                    dismiss_copy_toast(());
+                }
+            }
+        }
+    }
 
     if exit_action.get() == 1 {
         system.exit();
@@ -382,7 +429,10 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
     // Status text for search bar
     let rs = refresh_status.get();
     let toast_active = show_theme_toast.get();
-    let status_text = if toast_active {
+    let copy_toast_active = show_copy_toast.get();
+    let status_text = if copy_toast_active {
+        copy_toast_msg.to_string()
+    } else if toast_active {
         format!("Theme: {}", *theme_toast_name.read())
     } else {
         match rs {
@@ -399,7 +449,9 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
             }
         }
     };
-    let status_color = if toast_active {
+    let status_color = if copy_toast_active {
+        t.success
+    } else if toast_active {
         t.accent
     } else {
         match rs {

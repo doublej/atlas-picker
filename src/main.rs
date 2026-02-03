@@ -85,18 +85,6 @@ fn main() -> Result<()> {
                 "Cd" => {
                     println!("{}", project.path);
                 }
-                "Copy" => {
-                    use arboard::Clipboard;
-                    if let Ok(mut clipboard) = Clipboard::new() {
-                        if clipboard.set_text(&project.path).is_ok() {
-                            eprintln!("Path copied to clipboard");
-                        } else {
-                            eprintln!("Failed to copy to clipboard");
-                        }
-                    } else {
-                        eprintln!("Failed to access clipboard");
-                    }
-                }
                 "Finder" => {
                     std::process::Command::new("open")
                         .arg("-R")
