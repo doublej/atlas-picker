@@ -50,32 +50,87 @@ fn main() -> Result<()> {
     let selected = ui::run_picker(&cache.projects, theme, cache.scanned_at.as_deref())?;
 
     if let Some(project) = selected {
-        match args.action.as_str() {
-            "print" => match args.output.as_str() {
-                "json" => println!("{}", serde_json::to_string(&project)?),
-                "name" => println!("{}", project.name),
-                _ => println!("{}", project.path),
-            },
-            "cd" => {
-                // Output for shell eval: cd "/path/to/project"
-                println!("cd {:?}", project.path);
-            }
-            "code" => {
-                std::process::Command::new("code")
-                    .arg(&project.path)
-                    .spawn()
-                    .context("Failed to open VS Code")?;
-            }
-            "run" => {
-                if let Some(cmd) = &project.dev_command {
-                    let runner = project.runner.as_deref().unwrap_or("npm");
-                    println!("cd {:?} && {} run {}", project.path, runner, cmd);
-                } else {
-                    eprintln!("No dev command found for {}", project.name);
-                    std::process::exit(1);
+        // Check for TUI-selected action
+        let tui_action = project.scripts.as_ref().and_then(|s| s.get("_action"));
+        let tui_subaction = project.scripts.as_ref().and_then(|s| s.get("_subaction"));
+
+        if let (Some(action_str), Some(subaction)) = (tui_action, tui_subaction) {
+            if subaction == "code" {
+                // Code submenu action
+                match action_str.as_str() {
+                    "CodeClaude" => {
+                        std::process::Command::new("claude")
+                            .arg(&project.path)
+                            .spawn()
+                            .context("Failed to open Claude")?;
+                    }
+                    "CodeCodex" => {
+                        std::process::Command::new("codex")
+                            .arg(&project.path)
+                            .spawn()
+                            .context("Failed to open Codex")?;
+                    }
+                    "CodeOpencode" => {
+                        std::process::Command::new("opencode")
+                            .arg(&project.path)
+                            .spawn()
+                            .context("Failed to open Opencode")?;
+                    }
+                    _ => {}
                 }
             }
-            _ => println!("{}", project.path),
+        } else if let Some(action_str) = tui_action {
+            // TUI-selected action
+            match action_str.as_str() {
+                "Cd" => {
+                    println!("{}", project.path);
+                }
+                "Finder" => {
+                    std::process::Command::new("open")
+                        .arg("-R")
+                        .arg(&project.path)
+                        .spawn()
+                        .context("Failed to open Finder")?;
+                }
+                "Launch" => {
+                    if let Some(cmd) = &project.dev_command {
+                        let runner = project.runner.as_deref().unwrap_or("npm");
+                        println!("cd {:?} && {} run {}", project.path, runner, cmd);
+                    } else {
+                        eprintln!("No dev command found for {}", project.name);
+                        std::process::exit(1);
+                    }
+                }
+                _ => println!("{}", project.path),
+            }
+        } else {
+            // Default CLI action
+            match args.action.as_str() {
+                "print" => match args.output.as_str() {
+                    "json" => println!("{}", serde_json::to_string(&project)?),
+                    "name" => println!("{}", project.name),
+                    _ => println!("{}", project.path),
+                },
+                "cd" => {
+                    println!("cd {:?}", project.path);
+                }
+                "code" => {
+                    std::process::Command::new("code")
+                        .arg(&project.path)
+                        .spawn()
+                        .context("Failed to open VS Code")?;
+                }
+                "run" => {
+                    if let Some(cmd) = &project.dev_command {
+                        let runner = project.runner.as_deref().unwrap_or("npm");
+                        println!("cd {:?} && {} run {}", project.path, runner, cmd);
+                    } else {
+                        eprintln!("No dev command found for {}", project.name);
+                        std::process::exit(1);
+                    }
+                }
+                _ => println!("{}", project.path),
+            }
         }
     }
 
