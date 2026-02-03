@@ -474,13 +474,13 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
             ) {
                 Text(
                     content: if query_empty {
-                        "Type to search...".to_string()
+                        " Type to search...".to_string()
                     } else {
-                        query_str
+                        format!(" {}", query_str)
                     },
                     color: if query_empty { t.text_muted } else { t.accent },
                 )
-                Text(content: status_text, color: status_color)
+                Text(content: format!("{} ", status_text), color: status_color)
             }
             // Project list
             View(
@@ -564,7 +564,7 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
                 ) {
                     #(preview_lines.iter().map(|line| {
                         element! {
-                            Text(content: line.text.clone(), color: line.color)
+                            Text(content: format!(" {}", line.text), color: line.color)
                         }
                     }))
                 }
@@ -576,23 +576,23 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
                     flex_direction: FlexDirection::Column,
                 ) {
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: "\u{2191}/\u{2193}  ", color: t.accent)
+                        Text(content: " \u{2191}/\u{2193}  ", color: t.accent)
                         Text(content: "Navigate", color: t.text)
                     }
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: "Enter ", color: t.accent)
+                        Text(content: " Enter ", color: t.accent)
                         Text(content: "Select project", color: t.text)
                     }
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: "Esc   ", color: t.accent)
+                        Text(content: " Esc   ", color: t.accent)
                         Text(content: "Quit", color: t.text)
                     }
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: "^R    ", color: t.accent)
+                        Text(content: " ^R    ", color: t.accent)
                         Text(content: "Refresh index", color: t.text)
                     }
                     View(flex_direction: FlexDirection::Row) {
-                        Text(content: "^T    ", color: t.accent)
+                        Text(content: " ^T    ", color: t.accent)
                         Text(content: "Cycle theme", color: t.text)
                     }
                 }
