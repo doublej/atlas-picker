@@ -14,6 +14,8 @@ pub struct Theme {
     pub warning: Color,
     pub error: Color,
     pub selected_bg: Color,
+    pub action: Color,
+    pub action_selected: Color,
 }
 
 fn rgb(hex: u32) -> Color {
@@ -39,6 +41,8 @@ impl Theme {
             warning: rgb(0xe0af68),
             error: rgb(0xf7768e),
             selected_bg: rgb(0x24283b),
+            action: rgb(0x7aa2f7),
+            action_selected: rgb(0xbb9af7),
         }
     }
 
@@ -56,6 +60,8 @@ impl Theme {
             warning: rgb(0xf9e2af),
             error: rgb(0xf38ba8),
             selected_bg: rgb(0x313244),
+            action: rgb(0x89b4fa),
+            action_selected: rgb(0xcba6f7),
         }
     }
 
@@ -73,6 +79,8 @@ impl Theme {
             warning: rgb(0xf6c177),
             error: rgb(0xeb6f92),
             selected_bg: rgb(0x26233a),
+            action: rgb(0x3fd1be),
+            action_selected: rgb(0xc4a7e7),
         }
     }
 
@@ -90,6 +98,8 @@ impl Theme {
             warning: rgb(0xdf8e1d),
             error: rgb(0xd20f39),
             selected_bg: rgb(0xe6e9ef),
+            action: rgb(0x1e66f5),
+            action_selected: rgb(0x8839ef),
         }
     }
 

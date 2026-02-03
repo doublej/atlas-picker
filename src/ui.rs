@@ -10,6 +10,48 @@ use nucleo::{
 use std::os::unix::io::AsRawFd;
 use std::time::Duration;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    Cd,
+    Copy,
+    CodeClaude,
+    CodeCodex,
+    CodeOpencode,
+    Finder,
+    Launch,
+}
+
+impl Action {
+    fn label(&self) -> &'static str {
+        match self {
+            Action::Cd => "cd",
+            Action::Copy => "copy",
+            Action::CodeClaude => "claude",
+            Action::CodeCodex => "codex",
+            Action::CodeOpencode => "opencode",
+            Action::Finder => "finder",
+            Action::Launch => "launch",
+        }
+    }
+
+    fn is_code_subaction(&self) -> bool {
+        matches!(
+            self,
+            Action::CodeClaude | Action::CodeCodex | Action::CodeOpencode
+        )
+    }
+}
+
+const ACTIONS: [Action; 7] = [
+    Action::Cd,
+    Action::Copy,
+    Action::CodeClaude,
+    Action::CodeCodex,
+    Action::CodeOpencode,
+    Action::Finder,
+    Action::Launch,
+];
+
 fn filter_projects(projects: &[Project], query: &str) -> Vec<(usize, u32)> {
     if query.is_empty() {
         return projects.iter().enumerate().map(|(i, _)| (i, 0)).collect();
@@ -74,6 +116,8 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
     let mut query = hooks.use_state(String::new);
     let mut selected = hooks.use_state(|| 0usize);
     let mut exit_action = hooks.use_state(|| 0u8); // 0=none, 1=quit, 2=select
+    let mut selected_action = hooks.use_state(|| 0usize); // Index into ACTIONS
+    let mut in_code_submenu = hooks.use_state(|| false);
 
     // Theme state for live cycling
     let mut current_theme = hooks.use_state({
@@ -173,7 +217,13 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
                         show_theme_toast.set(true);
                         dismiss_toast(());
                     }
-                    KeyCode::Esc => exit_action.set(1),
+                    KeyCode::Esc => {
+                        if in_code_submenu.get() {
+                            in_code_submenu.set(false);
+                        } else {
+                            exit_action.set(1);
+                        }
+                    }
                     KeyCode::Enter => exit_action.set(2),
                     KeyCode::Up if count > 0 => {
                         let cur = selected.get() as i32;
@@ -181,6 +231,18 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
                     }
                     KeyCode::Down if count > 0 => {
                         selected.set((selected.get() + 1) % count);
+                    }
+                    KeyCode::Right => {
+                        let cur = selected_action.get();
+                        if cur + 1 < ACTIONS.len() {
+                            selected_action.set(cur + 1);
+                        }
+                    }
+                    KeyCode::Left => {
+                        let cur = selected_action.get();
+                        if cur > 0 {
+                            selected_action.set(cur - 1);
+                        }
                     }
                     KeyCode::Backspace => {
                         let mut q = query.to_string();
@@ -206,8 +268,36 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
     }
     if exit_action.get() == 2 {
         if let Some(&(idx, _)) = filtered.get(sel) {
-            if let Some(out) = props.result_out.as_mut() {
-                **out = Some(all_projects[idx].clone());
+            let project = &all_projects[idx];
+            let action_idx = selected_action.get();
+            let action = ACTIONS[action_idx];
+
+            if in_code_submenu.get() {
+                if let Some(out) = props.result_out.as_mut() {
+                    let mut p = project.clone();
+                    p.scripts = Some(
+                        [
+                            ("_action".to_string(), format!("{:?}", action)),
+                            ("_subaction".to_string(), "code".to_string()),
+                        ]
+                        .iter()
+                        .cloned()
+                        .collect(),
+                    );
+                    **out = Some(p);
+                }
+            } else if action.is_code_subaction() {
+                in_code_submenu.set(true);
+                return element!(View);
+            } else if let Some(out) = props.result_out.as_mut() {
+                let mut p = project.clone();
+                p.scripts = Some(
+                    [("_action".to_string(), format!("{:?}", action))]
+                        .iter()
+                        .cloned()
+                        .collect(),
+                );
+                **out = Some(p);
             }
         }
         system.exit();
@@ -235,6 +325,21 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
             }
         })
         .collect();
+
+    // Column widths for aligned layout
+    let max_name = rows.iter().map(|r| r.name.len()).max().unwrap_or(0);
+    let name_width = max_name.min((term_w as usize) * 2 / 5);
+    let max_fw = rows
+        .iter()
+        .filter_map(|r| r.framework.as_ref())
+        .map(|fw| fw.len() + 3) // " [fw]"
+        .max()
+        .unwrap_or(0);
+    let fw_width = max_fw.min(14);
+
+    // Calculate action buttons area for selected row
+    let current_action = ACTIONS[selected_action.get()];
+    let in_submenu = in_code_submenu.get();
 
     // Preview lines
     let preview_lines: Vec<PreviewLine> = if let Some(&(idx, _)) = filtered.get(sel) {
@@ -332,6 +437,11 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
                 overflow: Overflow::Hidden,
             ) {
                 #(rows.iter().map(|row| {
+                    let actions_to_show: Vec<Action> = if in_submenu {
+                        vec![Action::CodeClaude, Action::CodeCodex, Action::CodeOpencode]
+                    } else {
+                        ACTIONS.to_vec()
+                    };
                     element! {
                         View(
                             flex_direction: FlexDirection::Row,
@@ -342,20 +452,50 @@ fn Picker<'a>(props: &mut PickerProps<'a>, mut hooks: Hooks) -> impl Into<AnyEle
                                 color: t.accent,
                             )
                             Text(
-                                content: row.name.clone(),
+                                content: format!("{:<width$}", row.name, width = name_width),
                                 color: t.project,
                                 weight: Weight::Bold,
                             )
-                            #(row.framework.as_ref().map(|fw| {
-                                element! {
-                                    Text(content: format!(" [{fw}]"), color: t.framework)
-                                }
-                            }))
+                            Text(
+                                content: if let Some(fw) = &row.framework {
+                                    format!(" {:<width$}", format!("[{fw}]"), width = fw_width.saturating_sub(1))
+                                } else {
+                                    format!(" {:<width$}", "", width = fw_width.saturating_sub(1))
+                                },
+                                color: if row.framework.is_some() { t.framework } else { t.bg },
+                            )
                             #(row.project_type.as_ref().map(|pt| {
                                 element! {
                                     Text(content: format!(" {pt}"), color: t.text_muted)
                                 }
                             }))
+                            #(if row.is_selected {
+                                let actions_vec = actions_to_show.clone();
+                                Some(element! {
+                                    View(flex_direction: FlexDirection::Row, flex_grow: 1.0, justify_content: JustifyContent::FlexEnd) {
+                                        #(actions_vec.iter().enumerate().map(|(i, action)| {
+                                            let is_selected = if in_submenu {
+                                                *action == current_action
+                                            } else {
+                                                selected_action.get() == i
+                                            };
+                                            let btn_text = format!("[{}]", action.label());
+                                            element! {
+                                                View {
+                                                    Text(
+                                                        content: btn_text,
+                                                        color: if is_selected { t.action_selected } else { t.action },
+                                                        weight: if is_selected { Weight::Bold } else { Weight::Normal },
+                                                    )
+                                                    Text(content: " ", color: t.action)
+                                                }
+                                            }
+                                        }))
+                                    }
+                                })
+                            } else {
+                                None
+                            })
                         }
                     }
                 }))
