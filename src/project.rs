@@ -26,6 +26,25 @@ pub struct Project {
     pub has_justfile: Option<bool>,
     #[serde(default)]
     pub just_recipes: Option<Vec<String>>,
+    #[serde(default)]
+    pub deploy: Option<Vec<DeployInfo>>,
+    #[serde(default)]
+    pub beads: Option<BeadsInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeployInfo {
+    pub platform: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BeadsInfo {
+    pub open: u32,
+    pub in_progress: u32,
+    pub closed: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -40,7 +59,21 @@ pub struct CacheResult {
     pub scanned_at: Option<String>,
 }
 
-const API_BASE: &str = "http://localhost:47891";
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiIndex {
+    pub projects: Vec<Project>,
+    pub scanned_at: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentFileInfo {
+    pub exists: bool,
+    pub content: Option<String>,
+    pub file: Option<String>,
+}
 
 pub fn load_cache(path: &Path) -> Result<CacheResult> {
     let file = std::fs::File::open(path)?;
@@ -51,11 +84,59 @@ pub fn load_cache(path: &Path) -> Result<CacheResult> {
     })
 }
 
-pub fn refresh_projects() -> Result<Vec<Project>> {
-    let url = format!("{API_BASE}/api/refresh");
+pub fn fetch_projects(api_url: &str, _base_dir: &Path) -> Result<CacheResult> {
+    let url = format!("{api_url}/api/refresh");
     let mut resp = ureq::post(&url).send_empty()?;
-    let cache: CacheFile = resp.body_mut().read_json()?;
-    Ok(cache.projects)
+    let index: ApiIndex = resp.body_mut().read_json()?;
+    Ok(CacheResult {
+        projects: index.projects,
+        scanned_at: index.scanned_at,
+    })
+}
+
+pub fn api_open_iterm(api_url: &str, path: &str) -> Result<()> {
+    let url = format!("{api_url}/api/iterm");
+    ureq::post(&url).send_json(serde_json::json!({ "path": path }))?;
+    Ok(())
+}
+
+pub fn api_run_dev(api_url: &str, path: &str, command: &str, runner: Option<&str>) -> Result<()> {
+    let url = format!("{api_url}/api/run");
+    ureq::post(&url).send_json(serde_json::json!({
+        "path": path,
+        "command": command,
+        "runner": runner,
+    }))?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn api_agent_info(api_url: &str, path: &str, file: &str) -> Result<AgentFileInfo> {
+    let mut req = ureq::get(&format!("{api_url}/api/agent-files"));
+    req = req.query("path", path).query("file", file);
+    let mut resp = req.call()?;
+    let info: AgentFileInfo = resp.body_mut().read_json()?;
+    Ok(info)
+}
+
+pub fn api_agent_create(api_url: &str, path: &str, file: &str, open: bool) -> Result<()> {
+    let url = format!("{api_url}/api/agent-files");
+    ureq::post(&url).send_json(serde_json::json!({
+        "path": path,
+        "file": file,
+        "open": open,
+    }))?;
+    Ok(())
+}
+
+pub fn api_agent_copy(api_url: &str, path: &str, from: &str, to: &str) -> Result<()> {
+    let url = format!("{api_url}/api/agent-files");
+    ureq::put(&url).send_json(serde_json::json!({
+        "path": path,
+        "from": from,
+        "to": to,
+    }))?;
+    Ok(())
 }
 
 /// Parse a subset of ISO 8601 timestamps and return human-readable age.
